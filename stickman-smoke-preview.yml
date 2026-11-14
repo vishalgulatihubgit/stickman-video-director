@@ -1,0 +1,43 @@
+name: Stickman technical MP4 smoke preview
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install offline speech and video tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg espeak-ng
+      - name: Install renderer
+        working-directory: skills/directing-stickman-videos
+        run: npm ci
+      - name: Check renderer dependencies
+        working-directory: skills/directing-stickman-videos
+        run: node scripts/autopilot.mjs doctor
+      - name: Create original offline preview project
+        run: node studio/build-smoke-preview.mjs
+      - name: Validate technical preview
+        working-directory: skills/directing-stickman-videos
+        run: node scripts/autopilot.mjs validate ../../studio/generated/demo/project.json
+      - name: Render MP4 preview (not quality-accepted)
+        working-directory: skills/directing-stickman-videos
+        run: node scripts/autopilot.mjs preview ../../studio/generated/demo/project.json --seconds 10
+      - name: Upload MP4 and render diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stickman-smoke-preview
+          path: |
+            studio/generated/demo/output/preview.mp4
+            studio/generated/demo/output/preview-report.json
+            studio/generated/demo/project.json
+          if-no-files-found: warn
+          retention-days: 7
