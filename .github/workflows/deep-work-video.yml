@@ -1,0 +1,190 @@
+name: Deep Work - 60s Stickman B1 Studio
+
+on:
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: 'draft renders the 20s sample + full 60s draft; final requires an actual reviewed sample and an earlier draft run'
+        type: choice
+        options:
+          - draft
+          - final
+        default: draft
+        required: true
+      voice:
+        description: 'Piper is higher-quality offline voice; eSpeak is a robust offline fallback (draft only)'
+        type: choice
+        options:
+          - piper
+          - espeak
+        default: piper
+        required: true
+      source_run_id:
+        description: 'For final only: numeric draft run ID, from the earlier successful draft Actions URL'
+        required: false
+        type: string
+      approval_note:
+        description: 'For final only: your actual approval after you watched/listened to the 20s sample'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  create-video:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      VIDEO_DIR: studio/generated/deep-work
+      VOICE_ENGINE: ${{ inputs.voice }}
+      PIPER_MODEL: studio/voices/en_US-kristin-medium.onnx
+      SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+      APPROVAL_NOTE: ${{ inputs.approval_note }}
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install FFmpeg, FFprobe, and offline eSpeak NG
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg espeak-ng
+
+      - name: Install the actual Stickman B1 renderer
+        working-directory: skills/directing-stickman-videos
+        run: npm ci
+
+      - name: Check the actual bundled renderer
+        working-directory: skills/directing-stickman-videos
+        run: |
+          node scripts/autopilot.mjs doctor
+          node scripts/autopilot.mjs workflow --style B1 --ratio 16:9 > /tmp/b1-workflow.json
+
+      - name: Set up Python 3.11 for Piper
+        if: inputs.stage == 'draft' && inputs.voice == 'piper'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install offline Piper TTS
+        if: inputs.stage == 'draft' && inputs.voice == 'piper'
+        run: |
+          python -m pip install --disable-pip-version-check 'piper-tts==1.3.0'
+          command -v piper
+
+      - name: Fetch public-domain-based Piper Kristin voice and license notes
+        if: inputs.stage == 'draft' && inputs.voice == 'piper'
+        run: |
+          set -euo pipefail
+          mkdir -p studio/voices
+          BASE=https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/kristin/medium
+          curl -fL --retry 3 --connect-timeout 15 "$BASE/en_US-kristin-medium.onnx" -o studio/voices/en_US-kristin-medium.onnx
+          curl -fL --retry 3 --connect-timeout 15 "$BASE/en_US-kristin-medium.onnx.json" -o studio/voices/en_US-kristin-medium.onnx.json
+          curl -fL --retry 3 --connect-timeout 15 "$BASE/MODEL_CARD" -o studio/voices/MODEL_CARD
+          test "$(wc -c < studio/voices/en_US-kristin-medium.onnx)" -gt 10000000
+          grep -qi 'public domain' studio/voices/MODEL_CARD
+          grep -qi 'Trained from scratch' studio/voices/MODEL_CARD
+          echo 'Verified voice card declares public-domain training recordings and training from scratch.'
+
+      - name: Generate original script, 11 scenes, voice, captions, music, SFX
+        if: inputs.stage == 'draft'
+        run: node studio/build-deep-work.mjs
+
+      - name: Validate complete 60s B1 project and media
+        if: inputs.stage == 'draft'
+        working-directory: skills/directing-stickman-videos
+        run: node scripts/autopilot.mjs validate ../../studio/generated/deep-work/project.json
+
+      - name: Render 20-second narrated review sample
+        if: inputs.stage == 'draft'
+        working-directory: skills/directing-stickman-videos
+        run: node scripts/autopilot.mjs preview ../../studio/generated/deep-work/project.json --seconds 20
+
+      - name: Preserve the exact original sample and its review evidence
+        if: inputs.stage == 'draft'
+        run: |
+          cp "$VIDEO_DIR/output/preview.mp4" "$VIDEO_DIR/output/sample-20s.mp4"
+          cp "$VIDEO_DIR/output/preview-report.json" "$VIDEO_DIR/output/sample-20s-report.json"
+          cp -a "$VIDEO_DIR/output/preview-reference" "$VIDEO_DIR/output/sample-20s-reference"
+
+      - name: Render an entire 60-second draft, without claiming final acceptance
+        if: inputs.stage == 'draft'
+        working-directory: skills/directing-stickman-videos
+        run: node scripts/autopilot.mjs preview ../../studio/generated/deep-work/project.json --seconds 60 --replace
+
+      - name: Restore the genuine 20s approval sample for the future final job
+        if: inputs.stage == 'draft'
+        run: |
+          set -euo pipefail
+          mv "$VIDEO_DIR/output/preview.mp4" "$VIDEO_DIR/output/draft-60s.mp4"
+          mv "$VIDEO_DIR/output/preview-report.json" "$VIDEO_DIR/output/draft-60s-report.json"
+          mv "$VIDEO_DIR/output/preview-reference" "$VIDEO_DIR/output/draft-60s-reference"
+          cp "$VIDEO_DIR/output/sample-20s.mp4" "$VIDEO_DIR/output/preview.mp4"
+          cp "$VIDEO_DIR/output/sample-20s-report.json" "$VIDEO_DIR/output/preview-report.json"
+          cp -a "$VIDEO_DIR/output/sample-20s-reference" "$VIDEO_DIR/output/preview-reference"
+          ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1 "$VIDEO_DIR/output/draft-60s.mp4"
+          echo 'Full draft is a technical candidate, NOT an approved final video.'
+
+      - name: Upload full draft, sample, review template and all production files
+        if: inputs.stage == 'draft'
+        uses: actions/upload-artifact@v4
+        with:
+          name: deep-work-draft-and-source
+          path: studio/generated/deep-work/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 6
+
+      - name: Require real review and explicit approval for final render
+        if: inputs.stage == 'final'
+        run: |
+          set -euo pipefail
+          test -n "$SOURCE_RUN_ID" || (echo 'Supply source_run_id from a successful draft run.' && exit 1)
+          test "${#APPROVAL_NOTE}" -ge 12 || (echo 'Final requires a genuine user approval note.' && exit 1)
+          test -f studio/reviews/deep-work-preview-review.json || (echo 'Upload your actual completed 20s review as studio/reviews/deep-work-preview-review.json. Do not auto-fill pass fields.' && exit 1)
+
+      - name: Restore exact original production assets and preview from draft run
+        if: inputs.stage == 'final'
+        uses: actions/download-artifact@v4
+        with:
+          name: deep-work-draft-and-source
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ github.token }}
+          path: studio/generated/deep-work/
+
+      - name: Verify the restored project and approve the genuine review
+        if: inputs.stage == 'final'
+        working-directory: skills/directing-stickman-videos
+        run: |
+          set -euo pipefail
+          node scripts/autopilot.mjs validate ../../studio/generated/deep-work/project.json
+          node scripts/autopilot.mjs approve ../../studio/generated/deep-work/project.json \
+            --visual-review ../../studio/reviews/deep-work-preview-review.json \
+            --note "$APPROVAL_NOTE"
+
+      - name: Render repository-approved complete 60-second final MP4
+        if: inputs.stage == 'final'
+        working-directory: skills/directing-stickman-videos
+        run: node scripts/autopilot.mjs render ../../studio/generated/deep-work/project.json
+
+      - name: Upload final film, script, subtitles and QA artifacts
+        if: inputs.stage == 'final'
+        uses: actions/upload-artifact@v4
+        with:
+          name: deep-work-final-video
+          path: |
+            studio/generated/deep-work/output/film.mp4
+            studio/generated/deep-work/output/film-report.json
+            studio/generated/deep-work/output/approval.json
+            studio/generated/deep-work/captions.srt
+            studio/generated/deep-work/script.md
+            studio/generated/deep-work/shot-list.md
+            studio/generated/deep-work/CREDITS-AND-PROVENANCE.md
+          if-no-files-found: error
+          retention-days: 14
