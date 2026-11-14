@@ -32,6 +32,16 @@ for(let i=0;i<captions.length;i++){
 fs.writeFileSync(path.join(art,'concat.txt'),wavs.map(f=>`file '${path.basename(f)}'`).join('\n')+'\n');
 run('ffmpeg',['-hide_banner','-loglevel','error','-y','-f','concat','-safe','0','-i',path.join(art,'concat.txt'),'-c:a','pcm_s16le',path.join(project,'narration.wav')]);
 const end=duration(path.join(project,'narration.wav'));
+// Original quiet room-tone ambience
+run('ffmpeg',[
+  '-hide_banner','-loglevel','error','-y',
+  '-f','lavfi',
+  '-i','anoisesrc=color=pink:amplitude=0.04:sample_rate=44100',
+  '-t',String(end+0.25),
+  '-af','lowpass=f=420',
+  '-c:a','pcm_s16le',
+  path.join(project,'ambience.wav')
+]);
 let start=0;const shots=[],cues=[];
 for(let i=0;i<captions.length;i++){
  const stop=i===captions.length-1?end:Math.min(end,start+times[i]),span=stop-start;
@@ -41,6 +51,14 @@ for(let i=0;i<captions.length;i++){
  ]});
  cues.push({start,end:stop,text:captions[i]});start=stop;
 }
-const manifest={version:1,style:'B1',width:1280,height:720,fps:30,voice:{path:'narration.wav',lead:0,tail:0},captions:cues,shots,sfx:[],metadata:{working_note:'TECHNICAL SMOKE PREVIEW ONLY: robotic offline voice, coarse caption alignment, no licensed music, pending human creative review.'}};
+const manifest={version:1,style:'B1',width:1280,height:720,fps:30,voice:{path:'narration.wav',lead:0,tail:0},captions:cues,shots,sfx:[],
+ambience:[{
+  path:'ambience.wav',
+  start:0,
+  end,
+  gain:0.08,
+  loop:false
+}],
+metadata:{working_note:'TECHNICAL SMOKE PREVIEW ONLY: robotic offline voice, coarse caption alignment, no licensed music, pending human creative review.'}};
 fs.writeFileSync(path.join(project,'project.json'),JSON.stringify(manifest,null,2)+'\n');
 console.log(`Created ${project}, duration=${end.toFixed(2)}s, ${shots.length} scenes`);
